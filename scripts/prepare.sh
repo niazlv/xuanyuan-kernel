@@ -32,6 +32,35 @@ LOCK="$SRC/versions.lock.txt"
 
 note() { echo "$*" >> "$LOCK"; }
 
+# Патчи пишутся под конкретную базу GKI, а база двигается: между 6.6.77 и 6.6.118
+# контекст вокруг однострочных правок успевает разъехаться. Поэтому применяем
+# лесенкой, от строгого к терпимому, и запоминаем, каким способом легло —
+# чтобы нечистое применение было видно в versions.lock.txt, а не молча прошло.
+apply_patch() {
+    local patch_file="$1" label="$2"
+
+    if git -C "$COMMON" apply -v "$patch_file" 2>/dev/null; then
+        echo "    [точно]   $label"
+        note "patch: $label (точно)"
+        return 0
+    fi
+
+    if git -C "$COMMON" apply -3 -v "$patch_file" 2>/dev/null; then
+        echo "    [3-way]   $label"
+        note "patch: $label (трёхсторонним слиянием)"
+        return 0
+    fi
+
+    if patch -d "$COMMON" -p1 --forward --fuzz=3 --silent < "$patch_file"; then
+        echo "    [с фаззом] $label  <- контекст разъехался, проверьте результат"
+        note "patch: $label (С ФАЗЗОМ, контекст не совпал точно)"
+        return 0
+    fi
+
+    echo "!! не удалось применить: $label" >&2
+    return 1
+}
+
 echo "==> вариант: $VARIANT"
 note "variant: $VARIANT"
 note "gki_common: $(git -C "$COMMON" rev-parse HEAD)"
@@ -91,8 +120,7 @@ if [[ "$VARIANT" == ksunext-susfs ]]; then
     # Имя патча зависит от ветки susfs, поэтому ищем, а не хардкодим.
     SUSFS_PATCH="$(find "$KP" -maxdepth 1 -name '50_add_susfs_in_*.patch' | head -1)"
     [[ -n "$SUSFS_PATCH" ]] || { echo "не нашёл 50_add_susfs_in_*.patch в $KP" >&2; exit 1; }
-    echo "    применяю $(basename "$SUSFS_PATCH")"
-    git -C "$COMMON" apply -v "$SUSFS_PATCH"
+    apply_patch "$SUSFS_PATCH" "susfs/$(basename "$SUSFS_PATCH")"
 
     cat "$ROOT/config/fragments/susfs.config" >> "$COMMON/arch/arm64/configs/gki_defconfig"
 fi
@@ -104,9 +132,7 @@ while read -r line; do
     [[ -z "$line" ]] && continue
     patch_file="$ROOT/$line"
     [[ -f "$patch_file" ]] || { echo "нет патча: $patch_file" >&2; exit 1; }
-    echo "    $line"
-    git -C "$COMMON" apply -v "$patch_file"
-    note "patch: $line"
+    apply_patch "$patch_file" "$line"
 done < "$SERIES"
 
 # ── Брендирование kernel release ─────────────────────────────────────────────
