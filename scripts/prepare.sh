@@ -43,7 +43,12 @@ note "kernel_base: $KERNEL_BASE_VERSION"
 if [[ "$VARIANT" != vanilla ]]; then
     echo "==> подключаю KernelSU-Next ($KSU_NEXT_REF)"
     if [[ ! -d "$SRC/KernelSU-Next" ]]; then
-        git clone --depth=1 -b "$KSU_NEXT_REF" "$KSU_NEXT_REPO" "$SRC/KernelSU-Next"
+        # -b понимает ветку и тег, но не голый SHA, а его можно передать входным
+        # параметром workflow. Поэтому при неудаче клонируем целиком и отцепляемся.
+        git clone --depth=1 -b "$KSU_NEXT_REF" "$KSU_NEXT_REPO" "$SRC/KernelSU-Next" 2>/dev/null || {
+            git clone "$KSU_NEXT_REPO" "$SRC/KernelSU-Next"
+            git -C "$SRC/KernelSU-Next" checkout --detach "$KSU_NEXT_REF"
+        }
     fi
     KSU_SHA="$(git -C "$SRC/KernelSU-Next" rev-parse HEAD)"
     note "kernelsu_next: $KSU_SHA ($KSU_NEXT_REF)"
@@ -72,7 +77,10 @@ fi
 if [[ "$VARIANT" == ksunext-susfs ]]; then
     echo "==> подключаю susFS ($SUSFS_REF)"
     if [[ ! -d "$SRC/susfs4ksu" ]]; then
-        git clone --depth=1 -b "$SUSFS_REF" "$SUSFS_REPO" "$SRC/susfs4ksu"
+        git clone --depth=1 -b "$SUSFS_REF" "$SUSFS_REPO" "$SRC/susfs4ksu" 2>/dev/null || {
+            git clone "$SUSFS_REPO" "$SRC/susfs4ksu"
+            git -C "$SRC/susfs4ksu" checkout --detach "$SUSFS_REF"
+        }
     fi
     note "susfs4ksu: $(git -C "$SRC/susfs4ksu" rev-parse HEAD) ($SUSFS_REF)"
 
