@@ -1,0 +1,6 @@
+/src/
+/out/
+/dist/
+/artifacts/
+*.img
+*.ko

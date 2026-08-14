@@ -1,0 +1,187 @@
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      variants:
+        description: 'Что собирать: all, либо список через запятую (vanilla,ksunext,ksunext-susfs)'
+        required: false
+        default: 'all'
+      boot_security_patch:
+        description: 'boot.security_patch в образе (ГГГГ-ММ-ДД). Пусто = оставить значение Kleaf'
+        required: false
+        default: ''
+      gki_common_ref:
+        description: 'Коммит GKI common/ (пусто = из config/versions.env)'
+        required: false
+        default: ''
+      ksu_next_ref:
+        description: 'Ref KernelSU-Next (пусто = из config/versions.env)'
+        required: false
+        default: ''
+      susfs_ref:
+        description: 'Ref susfs4ksu (пусто = из config/versions.env)'
+        required: false
+        default: ''
+      release:
+        description: 'Опубликовать релиз по итогам сборки'
+        type: boolean
+        required: false
+        default: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      variants: ${{ steps.pick.outputs.variants }}
+    steps:
+      - id: pick
+        run: |
+          raw='${{ github.event.inputs.variants }}'
+          [ -z "$raw" ] && raw=all
+          if [ "$raw" = all ]; then
+            echo 'variants=["vanilla","ksunext","ksunext-susfs"]' >> "$GITHUB_OUTPUT"
+          else
+            json=$(echo "$raw" | tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep -v '^$' \
+                   | awk '{printf "\"%s\",", $0}' | sed 's/,$//')
+            echo "variants=[$json]" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJSON(needs.matrix.outputs.variants) }}
+    env:
+      # Пустые значения не перекрывают config/versions.env: там всё через ${VAR:-default}.
+      GKI_COMMON_REF: ${{ github.event.inputs.gki_common_ref }}
+      KSU_NEXT_REF: ${{ github.event.inputs.ksu_next_ref }}
+      SUSFS_REF: ${{ github.event.inputs.susfs_ref }}
+      BOOT_SECURITY_PATCH: ${{ github.event.inputs.boot_security_patch }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Сборка GKI через Bazel не влезает в образ раннера без уборки:
+      # исходники ~30 ГБ плюс выхлоп Bazel.
+      - name: Освободить место на диске
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/lib/jvm /opt/hostedtoolcache \
+                      "$AGENT_TOOLSDIRECTORY" || true
+          sudo apt-get -qq purge -y '^dotnet-.*' '^llvm-.*' '^mysql-.*' '^mongodb-.*' || true
+          sudo apt-get -qq autoremove -y || true
+          docker image prune -af || true
+          df -h /
+
+      - name: Поставить зависимости
+        run: |
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y --no-install-recommends \
+            git curl python3 python-is-python3 build-essential bc bison flex \
+            libssl-dev libelf-dev zip unzip rsync ccache
+          git config --global user.name  "ci"
+          git config --global user.email "ci@localhost"
+          git config --global color.ui false
+
+      - name: Выкачать исходники GKI
+        run: |
+          chmod +x scripts/*.sh
+          JOBS=$(nproc) ./scripts/setup-source.sh
+
+      - name: Подготовить дерево (${{ matrix.variant }})
+        run: ./scripts/prepare.sh '${{ matrix.variant }}'
+
+      - name: Собрать
+        run: JOBS=$(nproc) ./scripts/build.sh '${{ matrix.variant }}'
+
+      - name: Проверить уровень патча в boot-образе
+        run: |
+          # Страховка от молчаливой сборки с датой из будущего:
+          # такой образ необратимо ломает расшифровку /data на устройстве.
+          ./scripts/set-boot-patchlevel.sh dist/'${{ matrix.variant }}'/boot.img
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.variant }}
+          path: dist/${{ matrix.variant }}/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Разложить файлы и посчитать суммы
+        run: |
+          mkdir -p release
+          for dir in artifacts/*/; do
+            variant=$(basename "$dir")
+            for f in "$dir"*; do
+              [ -f "$f" ] || continue
+              case "$(basename "$f")" in
+                SHA256SUMS) continue ;;
+              esac
+              cp "$f" "release/${variant}-$(basename "$f")"
+            done
+          done
+          ( cd release && sha256sum ./* > SHA256SUMS )
+          ls -la release
+
+      - name: Собрать описание релиза
+        run: |
+          {
+            echo '## Варианты'
+            echo
+            echo '| вариант | что внутри |'
+            echo '|---|---|'
+            echo '| `vanilla` | чистый GKI, без рута |'
+            echo '| `ksunext` | KernelSU-Next |'
+            echo '| `ksunext-susfs` | KernelSU-Next + susFS |'
+            echo
+            echo '## Перед прошивкой'
+            echo
+            echo 'Проверьте объявленный уровень патча:'
+            echo
+            echo '```'
+            echo 'scripts/set-boot-patchlevel.sh <вариант>-boot.img'
+            echo '```'
+            echo
+            echo 'Образ с уровнем НИЖЕ того, под которым выпущены ключи устройства,'
+            echo 'сделает `/data` нерасшифровываемым. Понижение необратимо без сброса.'
+            echo
+            echo '## Зафиксированные версии'
+            echo
+            for f in artifacts/*/versions.lock.txt; do
+              [ -f "$f" ] || continue
+              echo "### $(basename "$(dirname "$f")")"
+              echo '```'
+              cat "$f"
+              echo '```'
+            done
+          } > NOTES.md
+          cat NOTES.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          body_path: NOTES.md
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('build-{0}', github.run_number) }}
+          name: ${{ github.ref_type == 'tag' && github.ref_name || format('build {0}', github.run_number) }}
+          draft: false
+          prerelease: ${{ github.ref_type != 'tag' }}

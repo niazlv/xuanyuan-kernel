@@ -1,0 +1,65 @@
+From: niazleushkin <niazlv03@gmail.com>
+Date: 2026-06-27
+Subject: [PATCH] common: add MediaTek MT7601U USB Wi-Fi as loadable modules
+
+Enables the in-tree MediaTek MT7601U driver (USB 148f:7601) for external
+USB Wi-Fi dongles on the GKI "lite" base.
+
+cfg80211, mac80211 and mt7601u are built as modules (=m); vmlinux is
+unchanged, so the kernel boots exactly like plain lite. cfg80211/mac80211
+are already present on the device (system_dlkm), so only mt7601u.ko needs
+to be shipped/loaded (see the KSU module). The three .ko outputs are
+declared in modules.bzl so the GKI module-list check passes.
+
+Apply with: git -C common apply patches/0005-common-mt7601u-usb-wifi.patch
+---
+diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
+index 3b958bc3c..2705f51b4 100644
+--- a/arch/arm64/configs/gki_defconfig
++++ b/arch/arm64/configs/gki_defconfig
+@@ -300,6 +300,8 @@ CONFIG_BT_HCIUART=m
+ CONFIG_BT_HCIUART_LL=y
+ CONFIG_BT_HCIUART_BCM=y
+ CONFIG_BT_HCIUART_QCA=y
++CONFIG_CFG80211=m
++CONFIG_MAC80211=m
+ CONFIG_RFKILL=m
+ CONFIG_NET_9P=m
+ CONFIG_NFC=m
+@@ -386,7 +388,7 @@ CONFIG_USB_NET_AQC111=m
+ # CONFIG_WLAN_VENDOR_INTEL is not set
+ # CONFIG_WLAN_VENDOR_INTERSIL is not set
+ # CONFIG_WLAN_VENDOR_MARVELL is not set
+-# CONFIG_WLAN_VENDOR_MEDIATEK is not set
++CONFIG_MT7601U=m
+ # CONFIG_WLAN_VENDOR_RALINK is not set
+ # CONFIG_WLAN_VENDOR_REALTEK is not set
+ # CONFIG_WLAN_VENDOR_RSI is not set
+diff --git a/modules.bzl b/modules.bzl
+index 1acf91722..351f08cb0 100644
+--- a/modules.bzl
++++ b/modules.bzl
+@@ -38,6 +38,7 @@ _COMMON_GKI_MODULES_LIST = [
+     "drivers/net/usb/r8153_ecm.ko",
+     "drivers/net/usb/rtl8150.ko",
+     "drivers/net/usb/usbnet.ko",
++    "drivers/net/wireless/mediatek/mt7601u/mt7601u.ko",
+     "drivers/net/wwan/wwan.ko",
+     "drivers/pps/pps_core.ko",
+     "drivers/ptp/ptp.ko",
+@@ -76,6 +77,7 @@ _COMMON_GKI_MODULES_LIST = [
+     "net/ieee802154/ieee802154_socket.ko",
+     "net/l2tp/l2tp_core.ko",
+     "net/l2tp/l2tp_ppp.ko",
++    "net/mac80211/mac80211.ko",
+     "net/mac802154/mac802154.ko",
+     "net/nfc/nfc.ko",
+     "net/rfkill/rfkill.ko",
+@@ -83,6 +85,7 @@ _COMMON_GKI_MODULES_LIST = [
+     "net/tipc/tipc.ko",
+     "net/tls/tls.ko",
+     "net/vmw_vsock/vmw_vsock_virtio_transport.ko",
++    "net/wireless/cfg80211.ko",
+ ]
+ 
+ # Deprecated - Use `get_gki_modules_list` function instead.

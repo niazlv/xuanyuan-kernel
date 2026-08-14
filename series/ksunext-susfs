@@ -1,0 +1,7 @@
+# KernelSU-Next + susFS.
+# Патч самой susFS берётся из апстрима по закреплённому коммиту
+# (scripts/prepare.sh), в репозитории не дублируется.
+patches/common/0010-wild-unicode-bypass-fix-6.1plus.patch
+patches/common/0011-wild-f2fs-reduce-congestion.patch
+patches/common/0012-wild-clear-page-16-byte-align.patch
+patches/device/0020-mt7601u-usb-wifi.patch
