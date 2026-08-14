@@ -37,8 +37,23 @@ repo sync -c -j"$JOBS" --no-tags --no-clone-bundle --fail-fast
 # Манифест указывает на голову ветки, а нам нужен коммит целевой прошивки.
 if [[ -n "${GKI_COMMON_REF:-}" ]]; then
     echo "==> закрепляю common/ на $GKI_COMMON_REF"
-    git -C common fetch --depth=1 origin "$GKI_COMMON_REF"
-    git -C common checkout --detach FETCH_HEAD
+
+    # В дереве, которым управляет repo, ремоут называется по имени из манифеста
+    # (для AOSP это "aosp"), а не "origin". Берём то, что есть на самом деле,
+    # и падаем на прямой URL, если ремоутов нет вовсе.
+    REMOTE="$(git -C common remote | head -1)"
+    [[ -n "$REMOTE" ]] || REMOTE="$GKI_COMMON_URL"
+    echo "    источник: $REMOTE"
+
+    # repo синхронизирует поверхностно, поэтому нужного коммита в истории нет.
+    # Сначала пробуем забрать его поштучно; если сервер не отдаёт произвольный
+    # SHA, углубляем историю целиком.
+    if ! git -C common fetch --depth=1 "$REMOTE" "$GKI_COMMON_REF"; then
+        echo "    fetch по SHA не прошёл, углубляю историю"
+        git -C common fetch --unshallow "$REMOTE" || git -C common fetch "$REMOTE"
+    fi
+
+    git -C common checkout --detach "$GKI_COMMON_REF"
 fi
 
 echo "==> common/ на коммите: $(git -C common rev-parse HEAD)"
