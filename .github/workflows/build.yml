@@ -130,24 +130,14 @@ jobs:
       - name: Разложить файлы и посчитать суммы
         run: |
           mkdir -p release
+          # В релизе только ядро и его разновидности. Модули, System.map и
+          # прочее остаются в артефактах самого запуска — там они и нужны.
           for dir in artifacts/*/; do
             variant=$(basename "$dir")
-
-            # Штучно выкладываем только то, что берут руками. Остальные ~100
-            # модулей GKI одинаковы у всех и в списке релиза только мешают —
-            # они уезжают одним архивом.
             for f in boot-xuanyuan.img boot.img boot-gz.img boot-lz4.img \
-                     Image Image.gz Image.lz4 System.map \
-                     versions.lock.txt mt7601u.ko; do
+                     Image Image.gz Image.lz4; do
               [ -f "$dir$f" ] && cp "$dir$f" "release/${variant}-$f"
             done
-
-            mods=$(find "$dir" -maxdepth 1 -name '*.ko' ! -name 'mt7601u.ko' | wc -l)
-            if [ "$mods" -gt 0 ]; then
-              tar -czf "release/${variant}-modules.tar.gz" \
-                  -C "$dir" $(cd "$dir" && ls *.ko | grep -v '^mt7601u.ko$')
-              echo "  $variant: $mods модулей в архиве"
-            fi
           done
           ( cd release && sha256sum ./* > SHA256SUMS )
           ls -la release
