@@ -37,28 +37,33 @@ note() { echo "$*" >> "$LOCK"; }
 # лесенкой, от строгого к терпимому, и запоминаем, каким способом легло —
 # чтобы нечистое применение было видно в versions.lock.txt, а не молча прошло.
 apply_patch() {
-    local patch_file="$1" label="$2"
+    local patch_file="$1" label="$2" method=""
 
     if git -C "$COMMON" apply -v "$patch_file" 2>/dev/null; then
-        echo "    [точно]   $label"
-        note "patch: $label (точно)"
-        return 0
+        method="точно"
+    elif patch -d "$COMMON" -p1 --forward --fuzz=3 --silent < "$patch_file"; then
+        method="С ФАЗЗОМ, контекст не совпал точно"
+    else
+        echo "!! не удалось применить: $label" >&2
+        return 1
     fi
 
-    if git -C "$COMMON" apply -3 -v "$patch_file" 2>/dev/null; then
-        echo "    [3-way]   $label"
-        note "patch: $label (трёхсторонним слиянием)"
-        return 0
-    fi
+    # git apply -3 здесь намеренно НЕ используется. Без blob'ов исходного дерева
+    # трёхстороннее слияние не отказывается, а вписывает в файлы маркеры
+    # конфликта и отчитывается успехом. Ломается это только на компиляции,
+    # причём далеко от места ошибки:
+    #   clear_page.S:18: error: version control conflict marker in file
+    # Поэтому после каждого наложения проверяем затронутые файлы.
+    local f
+    for f in $(sed -n 's|^+++ b/||p' "$patch_file"); do
+        if [[ -f "$COMMON/$f" ]] && grep -qE '^(<<<<<<<|>>>>>>>) ' "$COMMON/$f"; then
+            echo "!! $label: в $f остались маркеры конфликта" >&2
+            return 1
+        fi
+    done
 
-    if patch -d "$COMMON" -p1 --forward --fuzz=3 --silent < "$patch_file"; then
-        echo "    [с фаззом] $label  <- контекст разъехался, проверьте результат"
-        note "patch: $label (С ФАЗЗОМ, контекст не совпал точно)"
-        return 0
-    fi
-
-    echo "!! не удалось применить: $label" >&2
-    return 1
+    echo "    [$method] $label"
+    note "patch: $label ($method)"
 }
 
 echo "==> вариант: $VARIANT"
