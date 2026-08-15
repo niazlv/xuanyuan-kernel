@@ -138,14 +138,20 @@ done < "$SERIES"
 # ── Брендирование kernel release ─────────────────────────────────────────────
 # Kleaf без git-стампа подставляет "-maybe-dirty". Меняем на осмысленный суффикс,
 # чтобы по uname было видно, что за сборка.
-STAMP="$SRC/build/kleaf/impl/stamp.bzl"
+# Манифест GKI кладёт проект kernel/build в build/kernel, но в старых
+# манифестах путь был build/. Проверяем оба, иначе брендирование молча не
+# применяется и сборка получает суффикс -maybe-dirty.
+STAMP=""
+for candidate in "$SRC/build/kernel/kleaf/impl/stamp.bzl" "$SRC/build/kleaf/impl/stamp.bzl"; do
+    [[ -f "$candidate" ]] && { STAMP="$candidate"; break; }
+done
 SUFFIX="-${KERNEL_SUFFIX_BASE}-${VARIANT}"
-if [[ -f "$STAMP" ]]; then
+if [[ -n "$STAMP" ]]; then
     sed -i.bak "s|echo '-maybe-dirty'|echo '${SUFFIX}'|" "$STAMP"
     echo "==> суффикс kernel release: $SUFFIX"
     note "kernel_suffix: $SUFFIX"
 else
-    echo "!! не найден $STAMP — суффикс не проставлен, сборка получит -maybe-dirty" >&2
+    echo "!! stamp.bzl не найден — суффикс не проставлен, сборка получит -maybe-dirty" >&2
 fi
 
 echo "==> подготовка завершена"

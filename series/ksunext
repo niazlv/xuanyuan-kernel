@@ -1,4 +1,5 @@
 # KernelSU-Next без susFS.
+patches/common/0001-disable-defconfig-canonical-check.patch
 patches/common/0010-wild-unicode-bypass-fix-6.1plus.patch
 patches/common/0011-wild-f2fs-reduce-congestion.patch
 patches/common/0012-wild-clear-page-16-byte-align.patch
