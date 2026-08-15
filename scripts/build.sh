@@ -55,6 +55,18 @@ else
     done
 fi
 
+# ── Готовый к прошивке образ ─────────────────────────────────────────────────
+# boot.img от Kleaf собран по разметке GKI и на устройстве уходит в bootloop:
+# размер раздела и структура другие. Кладём рядом образ в заводском контейнере.
+TPL="$ROOT/device/${DEVICE:-}"
+if [[ -n "${DEVICE:-}" && -d "$TPL" && -f "$OUT/Image" ]]; then
+    echo "==> собираю готовый к прошивке boot-${DEVICE}.img"
+    "$ROOT/scripts/repack-boot.sh" "$TPL" "$OUT/Image" "$OUT/boot-${DEVICE}.img" \
+        "${BOOT_SECURITY_PATCH:-}"
+else
+    echo "!! контейнера device/${DEVICE:-<не задан>} нет — готовый образ не собран"
+fi
+
 ( cd "$OUT" && find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
     | sort -z | xargs -0 shasum -a 256 > SHA256SUMS )
 

@@ -1,157 +1,149 @@
 #!/usr/bin/env bash
 #
-# Вложить собранное ядро в стоковый boot.img устройства.
+# Собрать пригодный к прошивке boot.img: своё ядро в заводском контейнере.
 #
 # ЗАЧЕМ
 #
-# Kleaf собирает boot.img по разметке GKI: размер 64 МиБ и свой заголовок.
-# У xuanyuan раздел boot — 96 МиБ, и прошивка образа GKI даёт bootloop.
-# Рабочий образ получается заменой ядра внутри СТОКОВОГО boot.img: заголовок,
-# размер раздела и структура AVB при этом остаются заводскими.
+# Kleaf выдаёт boot.img по разметке GKI — 64 МиБ и свой заголовок. У xuanyuan
+# раздел boot занимает 96 МиБ, и прошивка образа GKI приводит к bootloop.
+# Рабочий образ получается заменой ядра внутри заводского контейнера: заголовок,
+# размер раздела и структура AVB остаются такими же, как у стока.
 #
-# Стоковый boot.img — часть прошивки Xiaomi, поэтому в релизах его нет и быть
-# не может. Возьмите его из fastboot-ROM своей версии (images/boot.img) или
-# считайте с устройства.
+# ЧТО ВАЖНО КРОМЕ САМОЙ ЗАМЕНЫ
 #
-# ЧТО ДЕЛАЕТ
+# Ядро другого размера сдвигает блок vbmeta, поэтому в AVBf-footer (последние
+# 64 байта раздела) обязательно правятся original_image_size и vbmeta_offset.
+# Без этого загрузчик читает свойства не оттуда и не видит
+# com.android.build.boot.security_patch — а от него зависит, откроется ли /data.
 #
-# Заменяет ядро, пересобирает образ и корректирует смещения в структурах AVB:
-# vbmeta переезжает вслед за изменившимся размером ядра, а AVBf-footer в конце
-# раздела получает новые original_image_size и vbmeta_offset. Без этого
-# загрузчик читал бы свойства не оттуда и не увидел бы boot.security_patch.
-#
-# Подписи AVB после замены ядра становятся недействительными. При
-# разблокированном загрузчике (verifiedbootstate=orange) они не проверяются;
-# на заблокированном такой образ не загрузится — это ожидаемо.
+# Подписи AVB после замены ядра недействительны. При разблокированном
+# загрузчике они не проверяются; на заблокированном такой образ не загрузится.
 #
 # Использование:
-#   repack-boot.sh <стоковый boot.img> <Image> <выходной boot.img> [ГГГГ-ММ-ДД]
+#   repack-boot.sh <контейнер|стоковый boot.img> <Image> <выход> [ГГГГ-ММ-ДД]
 #
-# Четвёртый аргумент — уровень патча для выходного образа. Если не задан,
-# сохраняется значение из стокового образа (обычно это и нужно).
+# Первым аргументом принимается каталог-контейнер (см. device/) либо стоковый
+# boot.img — тогда контейнер снимается с него на лету.
+#
+# Четвёртый аргумент — уровень патча выходного образа. Не задан — остаётся тот,
+# что в контейнере (то есть стоковый; обычно это и нужно).
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-STOCK=${1:-}
+SRC=${1:-}
 KERNEL=${2:-}
 OUT=${3:-}
 PATCHLEVEL=${4:-}
 
-if [[ -z "$STOCK" || -z "$KERNEL" || -z "$OUT" ]]; then
-    echo "Использование: $0 <стоковый boot.img> <Image> <выходной boot.img> [ГГГГ-ММ-ДД]" >&2
+if [[ -z "$SRC" || -z "$KERNEL" || -z "$OUT" ]]; then
+    echo "Использование: $0 <контейнер|стоковый boot.img> <Image> <выход> [ГГГГ-ММ-ДД]" >&2
     exit 1
 fi
-[[ -f "$STOCK"  ]] || { echo "нет файла: $STOCK" >&2; exit 1; }
-[[ -f "$KERNEL" ]] || { echo "нет файла: $KERNEL" >&2; exit 1; }
+[[ -f "$KERNEL" ]] || { echo "нет файла ядра: $KERNEL" >&2; exit 1; }
 
-STOCK="$STOCK" KERNEL="$KERNEL" OUT="$OUT" python3 - <<'PY'
-import os, struct, sys
+# Стоковый образ — снимаем контейнер во временный каталог.
+TEMPLATE="$SRC"
+TMP=""
+if [[ -f "$SRC" ]]; then
+    TMP="$(mktemp -d)"
+    trap 'rm -rf "$TMP"' EXIT
+    echo "==> снимаю контейнер со стокового образа"
+    "$ROOT/extract-boot-template.sh" "$SRC" "$TMP" >/dev/null
+    TEMPLATE="$TMP"
+elif [[ ! -d "$SRC" ]]; then
+    echo "нет ни файла, ни каталога: $SRC" >&2
+    exit 1
+fi
 
-stock_path  = os.environ['STOCK']
-kernel_path = os.environ['KERNEL']
-out_path    = os.environ['OUT']
+for f in boot-header.bin boot-signature.bin boot-vbmeta.bin boot-footer.bin boot-layout.env; do
+    [[ -f "$TEMPLATE/$f" ]] || { echo "в контейнере нет $f" >&2; exit 1; }
+done
 
-PAGE = 4096
+TEMPLATE="$TEMPLATE" KERNEL="$KERNEL" OUT="$OUT" python3 - <<'PY'
+import os, struct, sys, hashlib
+
+tpl    = os.environ['TEMPLATE']
+kernel = open(os.environ['KERNEL'], 'rb').read()
+out    = os.environ['OUT']
+
+cfg = {}
+for line in open(os.path.join(tpl, 'boot-layout.env')):
+    line = line.strip()
+    if line and not line.startswith('#') and '=' in line:
+        k, v = line.split('=', 1)
+        cfg[k] = v
+
+PART = int(cfg['PARTITION_SIZE'])
+PAGE = int(cfg['PAGE_SIZE'])
+RS   = int(cfg['RAMDISK_SIZE'])
+
 def pad_to(n, p=PAGE):
     return (n + p - 1) // p * p
 
-stock = open(stock_path, 'rb').read()
-kernel = open(kernel_path, 'rb').read()
+header = bytearray(open(os.path.join(tpl, 'boot-header.bin'), 'rb').read())
+sig    = open(os.path.join(tpl, 'boot-signature.bin'), 'rb').read()
+vbmeta = open(os.path.join(tpl, 'boot-vbmeta.bin'), 'rb').read()
+footer = open(os.path.join(tpl, 'boot-footer.bin'), 'rb').read()
 
-if stock[:8] != b'ANDROID!':
-    sys.exit(f"{stock_path}: не boot-образ (нет магии ANDROID!)")
+rd_path = os.path.join(tpl, 'boot-ramdisk.bin')
+ramdisk = open(rd_path, 'rb').read() if os.path.exists(rd_path) else b''
+if len(ramdisk) != RS:
+    sys.exit(f"ramdisk в контейнере ({len(ramdisk)}) не совпал с RAMDISK_SIZE ({RS})")
 
-hdr_version = struct.unpack_from('<I', stock, 40)[0]
-kernel_size, ramdisk_size = struct.unpack_from('<II', stock, 8)
+print(f"ядро: {cfg.get('STOCK_KERNEL_SIZE','?')} -> {len(kernel)}")
 
-print(f"стоковый образ: {len(stock)} байт, hdr_v{hdr_version}")
-print(f"  ядро    {kernel_size} -> {len(kernel)}")
-print(f"  ramdisk {ramdisk_size}")
-
-# Раскладка стокового образа
-k_off = PAGE
-r_off = k_off + pad_to(kernel_size)
-s_off = r_off + pad_to(ramdisk_size)          # подпись boot (v4)
-
-ramdisk = stock[r_off:r_off + ramdisk_size]
-
-# Размер подписи берём как расстояние до vbmeta, а не из поля заголовка:
-# так надёжнее, поле в разных версиях лежит по-разному.
-footer_off = len(stock) - 64
-if stock[footer_off:footer_off + 4] != b'AVBf':
-    sys.exit("AVBf-footer не найден в конце образа — структура неожиданная, не рискую")
-
-orig_size, vbmeta_off, vbmeta_size = struct.unpack_from('>QQQ', stock, footer_off + 12)
-print(f"  AVB: образ {orig_size}, vbmeta на {vbmeta_off} размером {vbmeta_size}")
-
-sig = stock[s_off:vbmeta_off]
-vbmeta = stock[vbmeta_off:vbmeta_off + vbmeta_size]
-if vbmeta[:4] != b'AVB0':
-    sys.exit("по vbmeta_offset нет магии AVB0 — структура неожиданная, не рискую")
-
-# Сборка нового образа
-header = bytearray(stock[:PAGE])
 struct.pack_into('<I', header, 8, len(kernel))
 
 body  = bytes(header)
-body += kernel + b'\x00' * (pad_to(len(kernel)) - len(kernel))
+body += kernel  + b'\x00' * (pad_to(len(kernel)) - len(kernel))
 body += ramdisk + b'\x00' * (pad_to(len(ramdisk)) - len(ramdisk))
 body += sig
 
-new_vbmeta_off = len(body)
-new_image = body + vbmeta
+vbmeta_off = len(body)
+if vbmeta_off + len(vbmeta) > PART:
+    sys.exit(f"образ не влезает в раздел: нужно {vbmeta_off + len(vbmeta)}, есть {PART}")
 
-if len(new_image) > len(stock):
-    sys.exit(f"новый образ ({len(new_image)}) не влезает в раздел ({len(stock)})")
+image = bytearray(body + vbmeta + b'\x00' * (PART - vbmeta_off - len(vbmeta)))
+image[PART - 64:PART] = footer
+struct.pack_into('>QQQ', image, PART - 64 + 12, vbmeta_off, vbmeta_off, len(vbmeta))
 
-# Добиваем нулями до размера раздела и кладём footer с новыми смещениями.
-new_image += b'\x00' * (len(stock) - len(new_image))
-new_image = bytearray(new_image)
-new_image[footer_off:footer_off + 64] = stock[footer_off:footer_off + 64]
-struct.pack_into('>QQQ', new_image, footer_off + 12,
-                 new_vbmeta_off, new_vbmeta_off, vbmeta_size)
-
-open(out_path, 'wb').write(bytes(new_image))
+open(out, 'wb').write(bytes(image))
 
 # ── Проверки ────────────────────────────────────────────────────────────────
-check = open(out_path, 'rb').read()
+chk = open(out, 'rb').read()
 errors = []
 
-if len(check) != len(stock):
-    errors.append(f"размер {len(check)} != стокового {len(stock)}")
-if check[:8] != b'ANDROID!':
+if len(chk) != PART:
+    errors.append(f"размер {len(chk)} != раздела {PART}")
+if chk[:8] != b'ANDROID!':
     errors.append("потеряна магия ANDROID!")
-if struct.unpack_from('<I', check, 8)[0] != len(kernel):
+if struct.unpack_from('<I', chk, 8)[0] != len(kernel):
     errors.append("kernel_size в заголовке не совпал")
-if check[PAGE:PAGE + len(kernel)] != kernel:
+if chk[PAGE:PAGE + len(kernel)] != kernel:
     errors.append("ядро записано не побайтово")
 
-o, vo, vs = struct.unpack_from('>QQQ', check, footer_off + 12)
-if (o, vo, vs) != (new_vbmeta_off, new_vbmeta_off, vbmeta_size):
+o, vo, vs = struct.unpack_from('>QQQ', chk, PART - 64 + 12)
+if (o, vo, vs) != (vbmeta_off, vbmeta_off, len(vbmeta)):
     errors.append("footer не обновился")
-if check[vo:vo + 4] != b'AVB0':
+if chk[vo:vo + 4] != b'AVB0':
     errors.append("по новому vbmeta_offset нет магии AVB0")
 
 KEY = b'com.android.build.boot.security_patch\x00'
-i = check.find(KEY)
+i = chk.find(KEY)
 if i < 0:
     errors.append("свойство boot.security_patch потерялось")
 else:
-    print(f"  boot.security_patch: {check[i+len(KEY):i+len(KEY)+10].decode(errors='replace')}")
+    print(f"boot.security_patch: {chk[i+len(KEY):i+len(KEY)+10].decode(errors='replace')}")
 
 if errors:
     sys.exit("ПРОВЕРКА НЕ ПРОШЛА:\n  - " + "\n  - ".join(errors))
 
-print(f"готово: {out_path} ({len(check)} байт), vbmeta переехал на {new_vbmeta_off}")
+print(f"готово: {out} ({len(chk)} байт), vbmeta на {vbmeta_off}")
 PY
 
 if [[ -n "$PATCHLEVEL" ]]; then
     echo
     "$ROOT/set-boot-patchlevel.sh" "$OUT" "$PATCHLEVEL"
 fi
-
-echo
-echo "Перед прошивкой сверьте уровень патча с тем, под которым выпущены ключи"
-echo "устройства — понижение необратимо ломает расшифровку /data."

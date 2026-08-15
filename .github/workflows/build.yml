@@ -132,13 +132,22 @@ jobs:
           mkdir -p release
           for dir in artifacts/*/; do
             variant=$(basename "$dir")
-            for f in "$dir"*; do
-              [ -f "$f" ] || continue
-              case "$(basename "$f")" in
-                SHA256SUMS) continue ;;
-              esac
-              cp "$f" "release/${variant}-$(basename "$f")"
+
+            # Штучно выкладываем только то, что берут руками. Остальные ~100
+            # модулей GKI одинаковы у всех и в списке релиза только мешают —
+            # они уезжают одним архивом.
+            for f in boot-xuanyuan.img boot.img boot-gz.img boot-lz4.img \
+                     Image Image.gz Image.lz4 System.map \
+                     versions.lock.txt mt7601u.ko; do
+              [ -f "$dir$f" ] && cp "$dir$f" "release/${variant}-$f"
             done
+
+            mods=$(find "$dir" -maxdepth 1 -name '*.ko' ! -name 'mt7601u.ko' | wc -l)
+            if [ "$mods" -gt 0 ]; then
+              tar -czf "release/${variant}-modules.tar.gz" \
+                  -C "$dir" $(cd "$dir" && ls *.ko | grep -v '^mt7601u.ko$')
+              echo "  $variant: $mods модулей в архиве"
+            fi
           done
           ( cd release && sha256sum ./* > SHA256SUMS )
           ls -la release
@@ -156,18 +165,29 @@ jobs:
             echo
             echo '## Перед прошивкой'
             echo
-            echo 'Файл `<вариант>-boot.img` из релиза прошивать НАПРЯМУЮ НЕЛЬЗЯ:'
-            echo 'он собран по разметке GKI (64 МиБ), а раздел boot у xuanyuan 96 МиБ,'
-            echo 'и такая прошивка даёт bootloop. Вложите ядро в свой стоковый образ:'
+            echo 'Берите **`<вариант>-boot-xuanyuan.img`** — он уже собран в заводском'
+            echo 'контейнере и готов к прошивке:'
             echo
             echo '```'
-            echo 'scripts/repack-boot.sh стоковый-boot.img <вариант>-Image готовый-boot.img'
-            echo 'fastboot flash boot_a готовый-boot.img'
+            echo 'fastboot getvar current-slot'
+            echo 'fastboot flash boot_a <вариант>-boot-xuanyuan.img'
             echo '```'
             echo
-            echo 'И сверьте уровень патча: образ с уровнем НИЖЕ того, под которым выпущены'
-            echo 'ключи устройства, сделает `/data` нерасшифровываемым, а ВЫШЕ — сломает'
-            echo 'будущие OTA и откаты. Понижение необратимо без сброса к заводским.'
+            echo 'Файл `<вариант>-boot.img` — это образ GKI на 64 МиБ. Он тут для тех,'
+            echo 'кому нужна generic-сборка; на xuanyuan (раздел 96 МиБ) его прошивка'
+            echo 'даёт bootloop.'
+            echo
+            echo '**Уровень патча.** Образы несут `2026-02-01` — столько же объявляет сток'
+            echo '301.0 и 302.0. Если ключи вашего устройства привязаны к другому значению'
+            echo '(например, после сборки с завышенной датой), поправьте перед прошивкой:'
+            echo
+            echo '```'
+            echo 'scripts/set-boot-patchlevel.sh <вариант>-boot-xuanyuan.img ГГГГ-ММ-ДД'
+            echo '```'
+            echo
+            echo 'Образ с уровнем НИЖЕ того, под которым выпущены ключи, сделает `/data`'
+            echo 'нерасшифровываемым; ВЫШЕ — сломает будущие OTA и откаты. Понижение'
+            echo 'необратимо без сброса к заводским настройкам.'
             echo
             echo '## Зафиксированные версии'
             echo
