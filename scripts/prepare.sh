@@ -92,6 +92,14 @@ done
 # Повторяем то, что делает официальный kernel/setup.sh, но с закреплением на
 # коммите: пайпить curl в bash в CI не хочется, да и воспроизводимость теряется.
 if [[ "$VARIANT" != vanilla ]]; then
+    # ksunext-susfs берёт форк pershoot (вшит susfs); ksunext — mainline KSU-Next.
+    # Код pershoot требует <linux/susfs.h>, поэтому для ksunext он не годится.
+    if [[ "$VARIANT" == ksunext-susfs ]]; then
+        KSU_NEXT_REPO="$KSU_NEXT_SUSFS_REPO"
+        KSU_NEXT_REF="$KSU_NEXT_SUSFS_REF"
+        KSU_VERSION_FALLBACK="$KSU_SUSFS_VERSION_FALLBACK"
+        KSU_VERSION_TAG_FALLBACK="$KSU_SUSFS_VERSION_TAG_FALLBACK"
+    fi
     echo "==> подключаю KernelSU-Next ($KSU_NEXT_REF)"
     if [[ ! -d "$SRC/KernelSU-Next" ]]; then
         # -b понимает ветку и тег, но не голый SHA, а его можно передать входным
