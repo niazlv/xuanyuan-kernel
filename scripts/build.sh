@@ -21,8 +21,12 @@ mkdir -p "$OUT"
 cd "$SRC"
 
 echo "==> сборка $BAZEL_TARGET (потоков: $JOBS)"
+# disk_cache ускоряет пересборки, но занимает место. На тесных дисках отключается
+# через BAZEL_NO_DISK_CACHE=1 (первая сборка от кэша всё равно не выигрывает).
+DISK_CACHE_ARG="--disk_cache=$SRC/.bazel-cache"
+[[ -n "${BAZEL_NO_DISK_CACHE:-}" ]] && DISK_CACHE_ARG=""
 tools/bazel run \
-    --disk_cache="$SRC/.bazel-cache" \
+    $DISK_CACHE_ARG \
     --jobs="$JOBS" \
     "$BAZEL_TARGET" -- --dist_dir="$SRC/out/dist"
 

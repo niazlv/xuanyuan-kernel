@@ -71,6 +71,23 @@ note "variant: $VARIANT"
 note "gki_common: $(git -C "$COMMON" rev-parse HEAD)"
 note "kernel_base: $KERNEL_BASE_VERSION"
 
+# GKI android14+ из google-артефактов защищает часть экспортируемых символов
+# файлами android/abi_gki_protected_exports_*. С ними вендорные модули (WiFi и
+# др.) не находят нужные символы, не грузятся, и устройство уходит в bootloop на
+# этапе загрузки модулей (лого -> откат на рабочий слот). susfs README требует
+# удалять их; рабочий ksun33177 это и делал. Common сбрасывается перед prepare,
+# так что удаление идемпотентно.
+for f in abi_gki_protected_exports_aarch64 abi_gki_protected_exports_x86_64; do
+    if [[ -f "$COMMON/android/$f" ]]; then
+        # НЕ удаляем: BUILD.bazel объявляет файл как вход, удаление ломает анализ
+        # ("missing input file"). Обнуляем — пустой список защищённых экспортов =
+        # вендорные модули видят все символы и грузятся.
+        : > "$COMMON/android/$f"
+        echo "==> обнулил android/$f (иначе вендорные модули не грузятся)"
+        note "emptied: android/$f"
+    fi
+done
+
 # ── KernelSU-Next ────────────────────────────────────────────────────────────
 # Повторяем то, что делает официальный kernel/setup.sh, но с закреплением на
 # коммите: пайпить curl в bash в CI не хочется, да и воспроизводимость теряется.
@@ -86,6 +103,11 @@ if [[ "$VARIANT" != vanilla ]]; then
     fi
     KSU_SHA="$(git -C "$SRC/KernelSU-Next" rev-parse HEAD)"
     note "kernelsu_next: $KSU_SHA ($KSU_NEXT_REF)"
+
+    # KernelSU-Next версионируется из git (напр. pershoot: 30000 + rev-list count).
+    # При shallow-клоне count = 1 -> мусорная версия. Убираем .git и полагаемся на
+    # KSU_VERSION_*_FALLBACK ниже, чтобы версия была детерминированной.
+    rm -rf "$SRC/KernelSU-Next/.git"
 
     ln -sfn ../../KernelSU-Next/kernel "$COMMON/drivers/kernelsu"
 
@@ -104,21 +126,48 @@ if [[ "$VARIANT" != vanilla ]]; then
         echo "    версия-заглушка: $KSU_VERSION_FALLBACK / $KSU_VERSION_TAG_FALLBACK"
     fi
 
+    # Патчи KSU-стороны для susfs-варианта: команды susfs, которых нет в форке
+    # (напр. add_sus_map_target_uid). Форк pershoot dev-susfs уже несёт основную
+    # интеграцию susfs, поэтому 10_enable_susfs_for_ksu.patch НЕ применяется.
+    if [[ "$VARIANT" == ksunext-susfs && -d "$ROOT/patches/ksu" ]]; then
+        shopt -s nullglob
+        for kp in "$ROOT"/patches/ksu/*.patch; do
+            echo "==> KSU susfs-патч: $(basename "$kp")"
+            if patch -d "$SRC/KernelSU-Next" -p1 --forward --fuzz=3 --silent < "$kp"; then
+                note "ksu_patch: ksu/$(basename "$kp")"
+            else
+                echo "!! не удалось применить KSU-патч $(basename "$kp")" >&2
+                exit 1
+            fi
+        done
+        shopt -u nullglob
+    fi
+
     cat "$ROOT/config/fragments/ksu.config" >> "$COMMON/arch/arm64/configs/gki_defconfig"
 fi
 
 # ── susFS ────────────────────────────────────────────────────────────────────
 if [[ "$VARIANT" == ksunext-susfs ]]; then
-    echo "==> подключаю susFS ($SUSFS_REF)"
-    if [[ ! -d "$SRC/susfs4ksu" ]]; then
-        git clone --depth=1 -b "$SUSFS_REF" "$SUSFS_REPO" "$SRC/susfs4ksu" 2>/dev/null || {
-            git clone "$SUSFS_REPO" "$SRC/susfs4ksu"
-            git -C "$SRC/susfs4ksu" checkout --detach "$SUSFS_REF"
-        }
+    # SUSFS_LOCAL позволяет собрать из локального дерева susfs4ksu (напр. с
+    # незапушенными правками), не клонируя из SUSFS_REPO.
+    if [[ -n "${SUSFS_LOCAL:-}" ]]; then
+        echo "==> susFS из локального дерева: $SUSFS_LOCAL"
+        [[ -d "$SUSFS_LOCAL/kernel_patches" ]] || { echo "нет $SUSFS_LOCAL/kernel_patches" >&2; exit 1; }
+        SUSFS_DIR="$SUSFS_LOCAL"
+        note "susfs4ksu: local:$SUSFS_LOCAL"
+    else
+        echo "==> подключаю susFS ($SUSFS_REF)"
+        SUSFS_DIR="$SRC/susfs4ksu"
+        if [[ ! -d "$SUSFS_DIR" ]]; then
+            git clone --depth=1 -b "$SUSFS_REF" "$SUSFS_REPO" "$SUSFS_DIR" 2>/dev/null || {
+                git clone "$SUSFS_REPO" "$SUSFS_DIR"
+                git -C "$SUSFS_DIR" checkout --detach "$SUSFS_REF"
+            }
+        fi
+        note "susfs4ksu: $(git -C "$SUSFS_DIR" rev-parse HEAD) ($SUSFS_REF)"
     fi
-    note "susfs4ksu: $(git -C "$SRC/susfs4ksu" rev-parse HEAD) ($SUSFS_REF)"
 
-    KP="$SRC/susfs4ksu/kernel_patches"
+    KP="$SUSFS_DIR/kernel_patches"
     cp -v "$KP"/fs/* "$COMMON/fs/"
     cp -v "$KP"/include/linux/* "$COMMON/include/linux/"
 
